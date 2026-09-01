@@ -41,10 +41,10 @@ export async function POST(request: Request) {
 
     // 3. Initialize unique dataset identifiers
     const datasetId = crypto.randomUUID();
-    const r2Key = `datasets/${session.userId}/${datasetId}.csv`;
+    const storageKey = `datasets/${session.userId}/${datasetId}.csv`;
 
-    // 4. Save original file to Cloudflare R2 storage
-    await StorageService.uploadFile(r2Key, fileBuffer, file.type || 'text/csv');
+    // 4. Save original file to Supabase Storage
+    await StorageService.uploadFile(storageKey, fileBuffer, file.type || 'text/csv');
 
     // 5. Parse, infer schemas, and load records into a dedicated PostgreSQL table
     const { tableName, rowCount } = await ProcessingService.processAndLoadCsv(datasetId, csvContent);
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     const dataset = await DatasetRepository.create({
       userId: session.userId,
       originalFilename: file.name,
-      r2Key,
+      r2Key: storageKey,
       tableName,
       rowCount,
     });

@@ -1,38 +1,45 @@
-import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { s3Client, r2Config } from '@/lib/r2';
+import { supabase, SUPABASE_STORAGE_BUCKET } from '@/lib/supabase';
 
 export const StorageService = {
   /**
-   * Uploads a file (CSV dataset) buffer to Cloudflare R2.
+   * Uploads a file (CSV dataset) buffer to Supabase Storage.
    * Returns the stored storage key (filename/path).
    */
   async uploadFile(key: string, body: Buffer | Uint8Array, contentType: string): Promise<string> {
-    const command = new PutObjectCommand({
-      Bucket: r2Config.bucketName,
-      Key: key,
-      Body: body,
-      ContentType: contentType,
-    });
-    await s3Client.send(command);
-    return key;
+    const { data, error } = await supabase.storage
+      .from(SUPABASE_STORAGE_BUCKET)
+      .upload(key, body, {
+        contentType,
+        upsert: true,
+      });
+
+    if (error) {
+      console.error('[Storage Service] Upload error:', error);
+      throw new Error(`Failed to upload file ${key} to Supabase Storage: ${error.message}`);
+    }
+
+    return data?.path || key;
   },
 
   /**
-   * Retrieves the string contents of a file stored in Cloudflare R2.
+   * Retrieves the string contents of a file stored in Supabase Storage.
    */
   async getFile(key: string): Promise<string> {
-    const command = new GetObjectCommand({
-      Bucket: r2Config.bucketName,
-      Key: key,
-    });
-    
     try {
-      const response = await s3Client.send(command);
-      const bodyStr = await response.Body?.transformToString();
-      return bodyStr || '';
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET)
+        .download(key);
+
+      if (error || !data) {
+        console.error('[Storage Service] Failed to retrieve file from Supabase Storage:', error);
+        throw new Error(`Failed to read file ${key} from Supabase Storage: ${error?.message}`);
+      }
+
+      return await data.text();
     } catch (error) {
-      console.error('[Storage Service] Failed to retrieve file from R2:', error);
-      throw new Error(`Failed to read file ${key} from R2 storage.`);
+      console.error('[Storage Service] Error reading file:', error);
+      throw new Error(`Failed to read file ${key} from Supabase Storage.`);
     }
   },
 };
+

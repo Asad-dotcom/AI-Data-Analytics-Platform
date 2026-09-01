@@ -82,7 +82,10 @@ export const ConversationService = {
         queryResults = await QueryService.executeQuery(generatedSql);
 
         // Send query results back to Gemini to synthesize natural insights and chart config
-        const insightResponse = await AIService.generateInsightsAndChart(question, queryResults);
+        const insightResponse = await AIService.generateInsightsAndChart(
+          question,
+          Array.isArray(queryResults) ? queryResults : []
+        );
         assistantResponseContent = insightResponse.insights;
         chartConfig = insightResponse.chartConfig;
 
