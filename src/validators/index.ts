@@ -19,7 +19,24 @@ export const LoginSchema = z.object({
 /**
  * Zod schema to validate conversation query requests.
  */
-export const AskQuestionSchema = z.object({
-  question: z.string().min(1, { message: 'Question cannot be empty' }),
-  datasetId: z.string().uuid({ message: 'Invalid dataset ID' }).optional(),
-});
+export const AskQuestionSchema = z
+  .object({
+    question: z.string().min(1).optional(),
+    query: z.string().min(1).optional(),
+    datasetId: z.string().uuid({ message: 'Invalid dataset ID' }).optional(),
+  })
+  .transform((data, ctx) => {
+    const q = data.question || data.query;
+    if (!q) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Question cannot be empty',
+        path: ['question'],
+      });
+      return z.NEVER;
+    }
+    return {
+      question: q,
+      datasetId: data.datasetId,
+    };
+  });

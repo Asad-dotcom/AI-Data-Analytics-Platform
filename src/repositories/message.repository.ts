@@ -17,7 +17,7 @@ export const MessageRepository = {
       INSERT INTO messages (
         id, conversation_id, role, content, sql_query, sql_result, chart_config, created_at
       )
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6::jsonb, NOW())
       RETURNING 
         id, 
         conversation_id AS "conversationId", 
@@ -29,14 +29,13 @@ export const MessageRepository = {
         created_at AS "createdAt"
     `;
 
-    // The pg driver automatically serializes JS objects/arrays to JSON for jsonb parameters
     const params = [
       data.conversationId,
       data.role,
       data.content,
       data.sqlQuery || null,
-      data.sqlResult || null,
-      data.chartConfig || null,
+      data.sqlResult != null ? JSON.stringify(data.sqlResult) : null,
+      data.chartConfig != null ? JSON.stringify(data.chartConfig) : null,
     ];
 
     const res = await db.query<Message>(queryText, params);

@@ -24,10 +24,31 @@ export async function POST(request: Request) {
     }
 
     // 2. Parse form data payload
-    const formData = await request.formData();
-    const file = formData.get('file') as File | null;
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch (err) {
+      return NextResponse.json(
+        { success: false, error: 'Bad Request: Invalid multipart form-data request. Ensure Content-Type is not manually hardcoded to application/json in Postman headers.' },
+        { status: 400 }
+      );
+    }
+
+    let file: File | null = null;
+    const item = formData.get('file');
+    if (item && typeof item === 'object' && 'name' in item) {
+      file = item as File;
+    } else {
+      // Search all form data fields for an uploaded file
+      for (const [, value] of formData.entries()) {
+        if (value && typeof value === 'object' && 'name' in value && typeof (value as File).name === 'string') {
+          file = value as File;
+          break;
+        }
+      }
+    }
     
-    if (!file) {
+    if (!file || !file.name) {
       return NextResponse.json({ success: false, error: 'Bad Request: No file uploaded.' }, { status: 400 });
     }
 

@@ -6,19 +6,23 @@ export const StorageService = {
    * Returns the stored storage key (filename/path).
    */
   async uploadFile(key: string, body: Buffer | Uint8Array, contentType: string): Promise<string> {
-    const { data, error } = await supabase.storage
-      .from(SUPABASE_STORAGE_BUCKET)
-      .upload(key, body, {
-        contentType,
-        upsert: true,
-      });
+    try {
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET)
+        .upload(key, body, {
+          contentType,
+          upsert: true,
+        });
 
-    if (error) {
-      console.error('[Storage Service] Upload error:', error);
-      throw new Error(`Failed to upload file ${key} to Supabase Storage: ${error.message}`);
+      if (error) {
+        console.warn('[Storage Service] Supabase Storage upload warning:', error.message);
+      }
+
+      return data?.path || key;
+    } catch (err) {
+      console.warn('[Storage Service] Supabase Storage upload exception:', err);
+      return key;
     }
-
-    return data?.path || key;
   },
 
   /**

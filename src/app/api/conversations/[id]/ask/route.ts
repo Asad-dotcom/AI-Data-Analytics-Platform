@@ -76,7 +76,7 @@ export async function POST(
   } catch (error) {
     console.error('[Ask API] Execution Error:', error);
     return NextResponse.json(
-      { success: false, error: 'An unexpected error occurred during processing.' },
+      { success: false, error: (error as Error).message || 'An unexpected error occurred during processing.' },
       { status: 500 }
     );
   }
