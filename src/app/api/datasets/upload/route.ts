@@ -5,8 +5,10 @@ import { ProcessingService } from '@/services/processing.service';
 import { DatasetRepository } from '@/repositories/dataset.repository';
 import crypto from 'crypto';
 
+import { convertFileToCsv } from '@/utils';
+
 /**
- * API Route: Dataset Upload (CSV)
+ * API Route: Dataset Upload (CSV, XLSX, PDF)
  * POST /api/datasets/upload
  */
 export async function POST(request: Request) {
@@ -52,13 +54,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Bad Request: No file uploaded.' }, { status: 400 });
     }
 
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      return NextResponse.json({ success: false, error: 'Bad Request: Only CSV files (.csv) are supported.' }, { status: 400 });
+    const filenameLower = file.name.toLowerCase();
+    const isSupported =
+      filenameLower.endsWith('.csv') ||
+      filenameLower.endsWith('.xlsx') ||
+      filenameLower.endsWith('.xls') ||
+      filenameLower.endsWith('.pdf');
+
+    if (!isSupported) {
+      return NextResponse.json(
+        { success: false, error: 'Bad Request: Only CSV (.csv), Excel (.xlsx, .xls), and PDF (.pdf) files are supported.' },
+        { status: 400 }
+      );
     }
 
-    // Convert file contents to buffer and string
+    // Read file buffer and convert PDF / XLSX to plain CSV
     const fileBuffer = Buffer.from(await file.arrayBuffer());
-    const csvContent = fileBuffer.toString('utf-8');
+    const { csvContent } = await convertFileToCsv(fileBuffer, file.name);
 
     // 3. Initialize unique dataset identifiers
     const datasetId = crypto.randomUUID();

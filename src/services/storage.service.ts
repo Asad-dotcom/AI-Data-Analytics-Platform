@@ -45,5 +45,22 @@ export const StorageService = {
       throw new Error(`Failed to read file ${key} from Supabase Storage.`);
     }
   },
+
+  /**
+   * Deletes a file from Supabase Storage.
+   */
+  async deleteFile(key: string): Promise<void> {
+    try {
+      const { error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET)
+        .remove([key]);
+
+      if (error) {
+        console.warn('[Storage Service] Supabase Storage delete warning:', error.message);
+      }
+    } catch (err) {
+      console.warn('[Storage Service] Supabase Storage delete exception:', err);
+    }
+  },
 };
 

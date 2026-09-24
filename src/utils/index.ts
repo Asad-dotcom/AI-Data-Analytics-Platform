@@ -50,3 +50,5 @@ export function sanitizeIdentifier(name: string): string {
   // If empty identifier, return a default col name
   return sanitized || 'col_unnamed';
 }
+
+export * from './file-converter';

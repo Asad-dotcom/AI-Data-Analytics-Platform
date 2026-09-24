@@ -1,6 +1,65 @@
 import { ai, GEMINI_MODEL } from '@/lib/gemini';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 
+const SUPPORTED_MODELS = [
+  'gemini-3.6-flash',
+  GEMINI_MODEL,
+  'gemini-3.6-pro',
+];
+
+/**
+ * Resilient Gemini API invoker with automatic retry on 503 high-demand / 429 quota spikes
+ */
+async function executeGeminiRequest(prompt: string): Promise<string> {
+  let lastError: any = null;
+
+  for (const modelName of Array.from(new Set(SUPPORTED_MODELS.filter(Boolean)))) {
+    // Attempt up to 3 retries per model if Google returns 503 high-demand
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+          },
+        });
+
+        if (response && response.text) {
+          return response.text;
+        }
+      } catch (error: any) {
+        lastError = error;
+        const status = error?.status || error?.code;
+        const message = error?.message || '';
+
+        console.warn(
+          `[AI Service] Attempt ${attempt}/3 on model ${modelName} encountered (${status}: ${message})`
+        );
+
+        // If Google server is experiencing temporary high demand (503), wait and retry
+        if (status === 503 || message.includes('503') || message.includes('high demand') || message.includes('UNAVAILABLE')) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1200));
+          continue;
+        }
+
+        // If rate limited (429), wait and retry
+        if (status === 429 || message.includes('429')) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        // If 404 (model deprecated for project), break inner loop to try next model in SUPPORTED_MODELS
+        if (status === 404 || message.includes('404') || message.includes('NOT_FOUND')) {
+          break;
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('Failed to generate response from AI models.');
+}
+
 export const AIService = {
   /**
    * Mode 1: Dataset Mode
@@ -13,37 +72,21 @@ export const AIService = {
   ): Promise<{ sql: string; explanation: string }> {
     const prompt = `
       You are an expert SQL generator for PostgreSQL.
-      Given the database table named "${tableName}" with the following column structure:
+      Given the database table named "${tableName}" with the column structure:
       ${schema}
 
       Generate an appropriate PostgreSQL SQL query to answer the user's question: "${question}"
 
-      Rules:
-      1. Generate ONLY a read-only SELECT statement. Do NOT generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, or other write queries.
-      2. Return ONLY valid SQL that matches the column names and data types of the schema.
-      3. Do not include markdown formatting or backticks in the "sql" field; return it as a raw SQL string.
-      4. Ensure all database table references are correctly enclosed in quotes or match "${tableName}" exactly.
+      CRITICAL RULES:
+      1. Generate ONLY a read-only SELECT statement. Do NOT generate write queries.
+      2. If casting any TEXT column to NUMERIC/DECIMAL for aggregations like AVG() or SUM(), ALWAYS strip commas and currency symbols first using: CAST(REPLACE(REPLACE(REPLACE("${tableName}"."col_name"::text, ',', ''), '$', ''), ' ', '') AS NUMERIC)!
+      3. If the user asks for a specific metric that is not literally in column names, pick the closest numerical column or perform COUNT / GROUP BY aggregation.
+      4. Return a JSON object with fields "sql" and "explanation".
     `;
 
     try {
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT' as never,
-            properties: {
-              sql: { type: 'STRING' },
-              explanation: { type: 'STRING' },
-            },
-            required: ['sql', 'explanation'],
-          },
-        },
-      });
-
-      const responseText = response.text || '{}';
-      const parsed = JSON.parse(responseText);
+      const responseText = await executeGeminiRequest(prompt);
+      const parsed = JSON.parse(responseText || '{}');
       return {
         sql: parsed.sql || '',
         explanation: parsed.explanation || '',
@@ -55,134 +98,128 @@ export const AIService = {
   },
 
   /**
-   * Mode 2: General Data Question (No File Uploaded)
-   * Uses Gemini knowledge to generate structured data, chart configuration, and insights.
+   * Mode 2: General Data Question (No File Uploaded or Complex Autonomous Synthesis)
+   * Uses Gemini knowledge base to answer complex questions (e.g. RFM segmentation, forecasting, dips)
+   * with complete datasets, charts, and crisp bullet points.
    */
   async generateGeneralData(
     question: string
   ): Promise<{ data: unknown[]; chartConfig: unknown; insights: string }> {
     const prompt = `
-      The user is asking a general data question: "${question}"
-      Use your internal knowledge base to generate:
-      1. A structured list of data rows (array of objects) suitable for charts.
-      2. A chart configuration object for Recharts.
-      3. A natural-language insight/summary of the data.
+      You are an expert lead data analyst and executive business consultant.
+      The user is asking a complex data analytics question: "${question}"
 
-      Rules for chartConfig:
-      - Must specify:
-        - "type": the chart type ('bar' | 'line' | 'area' | 'pie')
-        - "xKey": the property to use on the X-Axis
-        - "yKeys": array of properties to plot on the Y-Axis
+      CRITICAL MANDATE:
+      1. Answer the user's question directly with realistic, accurate, and high-value data analytics.
+      2. For complex analytics questions (e.g. Average Order Value, RFM customer segmentation, top 20% revenue share, 2026 3-month forecasting, monthly dips), generate realistic 6-12 item data arrays with numerical and categorical values.
+      3. Return ONLY a JSON object with 3 fields: "insights", "chartConfig", and "data".
+
+      FORMAT FOR "insights":
+      - Short, crisp, 3-4 bullet points maximum.
+      - Structure using clean Markdown:
+         ### Key Highlights
+         - **Direct Answer:** [Direct answer to user query with exact numbers]
+         - **Key Trend:** [Main observation or breakdown]
+         - **Strategic Action:** [Actionable business recommendation]
+
+      FORMAT FOR "chartConfig":
+      - "title": Professional title for the chart.
+      - "description": Short caption describing what the chart represents.
+      - "type": Best visual chart type ('bar' | 'line' | 'area' | 'pie').
+      - "xKey": Category property name in data objects for X-Axis.
+      - "yKeys": Array of numerical metric property names in data objects for Y-Axis.
+      - "colors": Array of modern hex color strings (e.g., ["#6366f1", "#10b981", "#ec4899", "#f59e0b", "#0ea5e9"]).
+
+      FORMAT FOR "data":
+      - Array of 6-12 objects containing clean categorical properties and numerical metrics for Recharts visualization.
     `;
 
     try {
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT' as never,
-            properties: {
-              data: {
-                type: 'ARRAY',
-                items: { type: 'OBJECT' },
-              },
-              chartConfig: {
-                type: 'OBJECT',
-                properties: {
-                  type: { type: 'STRING' },
-                  xKey: { type: 'STRING' },
-                  yKeys: {
-                    type: 'ARRAY',
-                    items: { type: 'STRING' },
-                  },
-                },
-                required: ['type', 'xKey', 'yKeys'],
-              },
-              insights: { type: 'STRING' },
-            },
-            required: ['data', 'chartConfig', 'insights'],
-          },
-        },
-      });
+      const responseText = await executeGeminiRequest(prompt);
+      const parsed = JSON.parse(responseText || '{}');
 
-      const responseText = response.text || '{}';
-      return JSON.parse(responseText);
-    } catch (error) {
+      return {
+        data: Array.isArray(parsed.data) ? parsed.data : [],
+        chartConfig: parsed.chartConfig || {
+          title: 'Analytics Summary',
+          type: 'bar',
+          xKey: 'Category',
+          yKeys: ['Value'],
+        },
+        insights: parsed.insights || 'Analysis generated successfully.',
+      };
+    } catch (error: any) {
       console.error('[AI Service] Failed to generate general data response:', error);
-      throw new Error('Failed to retrieve answer for your general question. Please try again.');
+      if (error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('Quota exceeded')) {
+        throw new Error('API Rate limit reached for Gemini free tier. Please wait ~30 seconds and try again.');
+      }
+      throw new Error('Failed to retrieve answer for your question. Please try again.');
     }
   },
 
   /**
    * Post-Query Insight and Chart Generation
-   * Generates natural language insights and Recharts configuration from query execution results.
+   * Synthesizes natural language text insights along with Recharts configuration based on query results.
    */
   async generateInsightsAndChart(
     question: string,
     queryResults: unknown[]
   ): Promise<{ insights: string; chartConfig: unknown }> {
     const prompt = `
+      You are an expert lead data analyst.
       The user asked: "${question}"
-      Here are the query results from their database:
+
+      Here are the actual SQL query execution results from their dataset (up to 100 rows):
       ${JSON.stringify(queryResults.slice(0, 100), null, 2)}
 
-      Generate:
-      1. Natural-language insights/summaries explaining the result data in relation to their question.
-      2. A Recharts chart configuration object.
+      Return ONLY a JSON object with fields "insights" and "chartConfig".
 
-      Rules for chartConfig:
-      - Must specify:
-        - "type": the chart type ('bar' | 'line' | 'area' | 'pie')
-        - "xKey": the property name for the X-Axis
-        - "yKeys": array of property names to plot on the Y-Axis
+      FORMAT FOR "insights":
+      - Short, crisp, 3-4 bullet points maximum.
+      - Structure using clean Markdown:
+         ### Key Highlights
+         - **Key Finding:** [Finding based on data]
+         - **Trend:** [Observation]
+         - **Recommendation:** [Next step]
+
+      FORMAT FOR "chartConfig":
+      - "title": Professional title for the chart.
+      - "description": Short caption explaining the visual data.
+      - "type": Best chart visualization type ('bar' | 'line' | 'area' | 'pie').
+      - "xKey": Main categorical column name for X-Axis.
+      - "yKeys": Array of numerical metric column names for Y-Axis.
+      - "colors": Array of modern hex color strings (e.g., ["#6366f1", "#10b981", "#ec4899", "#f59e0b", "#0ea5e9"]).
     `;
 
     try {
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT' as never,
-            properties: {
-              insights: { type: 'STRING' },
-              chartConfig: {
-                type: 'OBJECT',
-                properties: {
-                  type: { type: 'STRING' },
-                  xKey: { type: 'STRING' },
-                  yKeys: {
-                    type: 'ARRAY',
-                    items: { type: 'STRING' },
-                  },
-                },
-                required: ['type', 'xKey', 'yKeys'],
-              },
-            },
-            required: ['insights', 'chartConfig'],
-          },
-        },
-      });
+      const responseText = await executeGeminiRequest(prompt);
+      const parsed = JSON.parse(responseText || '{}');
 
-      const responseText = response.text || '{}';
-      return JSON.parse(responseText);
-    } catch (error) {
+      return {
+        insights: parsed.insights || 'Query analysis complete.',
+        chartConfig: parsed.chartConfig || {
+          title: 'Query Visual Output',
+          type: 'bar',
+          xKey: 'Category',
+          yKeys: ['Value'],
+        },
+      };
+    } catch (error: any) {
       console.error('[AI Service] Failed to generate insights and chart config:', error);
+      if (error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('Quota exceeded')) {
+        throw new Error('API Rate limit reached for Gemini free tier. Please wait ~30 seconds and try again.');
+      }
       throw new Error('Failed to generate insights from the query results.');
     }
   },
 
   /**
    * Minor LangChain Usage Example.
-   * Invokes Gemini model using LangChain's google-genai wrapper.
    */
   async askLangChain(prompt: string): Promise<string> {
     try {
       const model = new ChatGoogleGenerativeAI({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_MODEL,
         apiKey: process.env.GEMINI_API_KEY,
       });
       const response = await model.invoke(prompt);

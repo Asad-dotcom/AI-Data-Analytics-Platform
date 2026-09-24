@@ -36,6 +36,15 @@ export interface Message {
   createdAt: Date;
 }
 
+export interface ChartConfig {
+  type: 'bar' | 'line' | 'area' | 'pie';
+  xKey: string;
+  yKeys: string[];
+  title?: string;
+  description?: string;
+  colors?: string[];
+}
+
 // Common response wrapper
 export interface ApiResponse<T = unknown> {
   success: boolean;

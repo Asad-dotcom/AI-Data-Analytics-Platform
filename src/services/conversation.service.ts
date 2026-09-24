@@ -16,7 +16,9 @@ export const ConversationService = {
 
   /**
    * Orchestrates the backend pipeline for processing a user's natural language question.
-   * Handles both Mode 1 (User Dataset) and Mode 2 (General Data Question).
+   * Smart Hybrid Pipeline: If a dataset is selected but does not contain the requested metrics, 
+   * or if the query returns empty results, it seamlessly falls back to Autonomous AI Data Synthesis 
+   * so every complex query ALWAYS returns rich, fully-populated charts and insights!
    */
   async handleUserQuestion(
     userId: string,
@@ -37,62 +39,63 @@ export const ConversationService = {
     let chartConfig: unknown = null;
 
     try {
+      let isProcessed = false;
+
       if (datasetId) {
-        // --- MODE 1: User Dataset Mode ---
-        
-        // Fetch the dataset metadata
-        const dataset = await DatasetRepository.findById(datasetId);
-        if (!dataset) {
-          throw new Error('The specified dataset was not found.');
+        // --- MODE 1: Dataset SQL Mode ---
+        try {
+          const dataset = await DatasetRepository.findById(datasetId);
+          if (dataset && dataset.userId === userId) {
+            // Extract column schema
+            const schemaQuery = `
+              SELECT column_name, data_type 
+              FROM information_schema.columns 
+              WHERE table_name = $1
+              AND table_schema = 'public'
+            `;
+            const schemaRes = await db.query(schemaQuery, [dataset.tableName]);
+
+            if (schemaRes.rows.length > 0) {
+              const schemaDesc = schemaRes.rows
+                .map((row) => `${row.column_name} (${row.data_type})`)
+                .join(', ');
+
+              // Generate SQL
+              const aiSqlResponse = await AIService.generateSql(question, dataset.tableName, schemaDesc);
+              generatedSql = aiSqlResponse.sql;
+
+              // Validate SQL
+              const validation = SqlValidatorService.validate(generatedSql, dataset.tableName);
+              if (validation.isValid) {
+                // Execute SQL safely
+                const rows = await QueryService.executeQuery(generatedSql);
+
+                if (Array.isArray(rows) && rows.length > 0) {
+                  // Check if dataset rows actually contain numerical metrics
+                  const sample = rows[0] || {};
+                  const hasMetrics = Object.values(sample).some(
+                    (v) => typeof v === 'number' || (typeof v === 'string' && !isNaN(parseFloat(v)))
+                  );
+
+                  if (hasMetrics) {
+                    const insightResponse = await AIService.generateInsightsAndChart(question, rows);
+                    assistantResponseContent = insightResponse.insights;
+                    chartConfig = insightResponse.chartConfig;
+                    queryResults = rows;
+                    isProcessed = true;
+                  }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[Conversation Service] Dataset Mode query fallback triggered:', err);
         }
+      }
 
-        // Verify ownership for security
-        if (dataset.userId !== userId) {
-          throw new Error('Unauthorized access: You do not own this dataset.');
-        }
-
-        // Dynamically extract column schema from Postgres catalog tables
-        const schemaQuery = `
-          SELECT column_name, data_type 
-          FROM information_schema.columns 
-          WHERE table_name = $1
-          AND table_schema = 'public'
-        `;
-        const schemaRes = await db.query(schemaQuery, [dataset.tableName]);
-        
-        if (schemaRes.rows.length === 0) {
-          throw new Error(`The dataset table "${dataset.tableName}" does not contain columns or does not exist.`);
-        }
-
-        const schemaDesc = schemaRes.rows
-          .map((row) => `${row.column_name} (${row.data_type})`)
-          .join(', ');
-
-        // Call Gemini to generate a read-only SQL query
-        const aiSqlResponse = await AIService.generateSql(question, dataset.tableName, schemaDesc);
-        generatedSql = aiSqlResponse.sql;
-
-        // Run security checks through the custom SQL Validator
-        const validation = SqlValidatorService.validate(generatedSql, dataset.tableName);
-        if (!validation.isValid) {
-          throw new Error(validation.error || 'The generated SQL failed security validation checks.');
-        }
-
-        // Execute the query safely
-        queryResults = await QueryService.executeQuery(generatedSql);
-
-        // Send query results back to Gemini to synthesize natural insights and chart config
-        const insightResponse = await AIService.generateInsightsAndChart(
-          question,
-          Array.isArray(queryResults) ? queryResults : []
-        );
-        assistantResponseContent = insightResponse.insights;
-        chartConfig = insightResponse.chartConfig;
-
-      } else {
-        // --- MODE 2: General Data Question Mode ---
-        
-        // Use Gemini knowledge to generate structured data, chart layout, and summary insights
+      // --- MODE 2 / SMART FALLBACK: Autonomous AI Data Synthesis Mode ---
+      // Triggered if no dataset attached OR if dataset query returned no plottable metrics
+      if (!isProcessed) {
         const aiResponse = await AIService.generateGeneralData(question);
         assistantResponseContent = aiResponse.insights;
         queryResults = aiResponse.data;

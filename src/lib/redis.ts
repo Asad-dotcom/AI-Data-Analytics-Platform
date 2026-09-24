@@ -11,17 +11,28 @@ declare global {
 
 let redis: RedisClient;
 
+const clientOptions = {
+  url: redisUrl,
+  socket: {
+    reconnectStrategy: false, // Disable infinite retries
+  },
+};
+
 if (process.env.NODE_ENV === 'production') {
-  redis = createClient({ url: redisUrl });
-  redis.connect().catch((err) => console.error('[Redis Connect Error]', err));
+  redis = createClient(clientOptions);
+  redis.connect().catch(() => console.warn('[Redis] Connection failed, falling back to in-memory/fail-open.'));
 } else {
   if (!globalThis.globalRedis) {
-    globalThis.globalRedis = createClient({ url: redisUrl });
-    globalThis.globalRedis.connect().catch((err) => console.error('[Redis Connect Error]', err));
+    globalThis.globalRedis = createClient(clientOptions);
+    globalThis.globalRedis.connect().catch(() => console.warn('[Redis] Connection failed, falling back to in-memory/fail-open.'));
   }
   redis = globalThis.globalRedis;
 }
 
-redis.on('error', (err) => console.error('[Redis Client Error]', err));
+redis.on('error', (err: any) => {
+  if (err?.code !== 'ECONNREFUSED' && err?.code !== 'ENOTFOUND') {
+    console.error('[Redis Client Error]', err);
+  }
+});
 
 export { redis };
